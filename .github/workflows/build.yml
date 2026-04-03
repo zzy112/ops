@@ -8,7 +8,6 @@ on:
 
 env:
   LIBREOFFICE_WIN_URL: "https://download.documentfoundation.org/libreoffice/portable/25.2.2/LibreOfficePortable_25.2.2_MultilingualStandard.paf.exe"
-  LIBREOFFICE_MAC_URL: "https://download.documentfoundation.org/libreoffice/stable/25.2.2/mac/aarch64/LibreOffice_25.2.2_MacOS_aarch64.dmg"
 
 jobs:
   build:
@@ -77,21 +76,15 @@ jobs:
           path: img2pdf/build/bin/img2pdf-windows.zip
 
       # --- Bundle LibreOffice (macOS) ---
-      - name: Download and bundle LibreOffice (macOS)
+      - name: Install and bundle LibreOffice (macOS)
         if: runner.os == 'macOS'
         run: |
-          curl -L -o /tmp/LibreOffice.dmg "${{ env.LIBREOFFICE_MAC_URL }}"
-          hdiutil attach /tmp/LibreOffice.dmg -mountpoint /tmp/lo_mount -nobrowse
+          brew install --cask libreoffice
           # Copy LibreOffice into app bundle Resources
-          mkdir -p "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice"
-          cp -R /tmp/lo_mount/LibreOffice.app/Contents/* "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/"
-          # Create symlink for soffice in program dir
           mkdir -p "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program"
-          if [ ! -f "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program/soffice" ]; then
-            ln -s "../MacOS/soffice" "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program/soffice"
-          fi
-          hdiutil detach /tmp/lo_mount
-          rm /tmp/LibreOffice.dmg
+          cp -R /Applications/LibreOffice.app/Contents/MacOS/* "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program/"
+          cp -R /Applications/LibreOffice.app/Contents/Frameworks "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/"
+          cp -R /Applications/LibreOffice.app/Contents/Resources "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/share" || true
 
       - name: Zip macOS app
         if: runner.os == 'macOS'
