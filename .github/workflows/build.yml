@@ -1,0 +1,81 @@
+name: Build img2pdf
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows/amd64
+            artifact: img2pdf.exe
+          - os: macos-latest
+            platform: darwin/universal
+            artifact: img2pdf.app
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install mupdf
+
+      - name: Build
+        working-directory: img2pdf
+        run: wails build -platform ${{ matrix.platform }}
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: img2pdf-windows
+          path: img2pdf/build/bin/img2pdf.exe
+
+      - name: Zip macOS app
+        if: runner.os == 'macOS'
+        run: cd img2pdf/build/bin && zip -r img2pdf-macos.zip img2pdf.app
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: img2pdf-macos
+          path: img2pdf/build/bin/img2pdf-macos.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            img2pdf-windows/img2pdf.exe
+            img2pdf-macos/img2pdf-macos.zip
+          generate_release_notes: true
