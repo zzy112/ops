@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  LIBREOFFICE_WIN_URL: "https://download.documentfoundation.org/libreoffice/portable/25.2.2/LibreOfficePortable_25.2.2_MultilingualStandard.paf.exe"
+  LIBREOFFICE_MAC_URL: "https://download.documentfoundation.org/libreoffice/stable/25.2.2/mac/aarch64/LibreOffice_25.2.2_MacOS_aarch64.dmg"
+
 jobs:
   build:
     strategy:
@@ -43,16 +47,55 @@ jobs:
         working-directory: img2pdf
         run: wails build -platform ${{ matrix.platform }}
 
+      # --- Bundle LibreOffice Portable (Windows) ---
+      - name: Download LibreOffice Portable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $outDir = "img2pdf/build/bin"
+          # Download portable installer
+          Invoke-WebRequest -Uri "${{ env.LIBREOFFICE_WIN_URL }}" -OutFile "$outDir/LibreOfficePortable.exe"
+          # Extract using 7z (silent extract)
+          7z x "$outDir/LibreOfficePortable.exe" -o"$outDir/LibreOfficePortable" -y
+          # Move the App/libreoffice folder next to exe
+          Move-Item "$outDir/LibreOfficePortable/App/libreoffice" "$outDir/libreoffice"
+          # Cleanup
+          Remove-Item "$outDir/LibreOfficePortable" -Recurse -Force
+          Remove-Item "$outDir/LibreOfficePortable.exe" -Force
+
+      - name: Zip Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "img2pdf/build/bin/img2pdf.exe", "img2pdf/build/bin/libreoffice" -DestinationPath "img2pdf/build/bin/img2pdf-windows.zip"
+
       - name: Upload Windows artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: img2pdf-windows
-          path: img2pdf/build/bin/img2pdf.exe
+          path: img2pdf/build/bin/img2pdf-windows.zip
+
+      # --- Bundle LibreOffice (macOS) ---
+      - name: Download and bundle LibreOffice (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -L -o /tmp/LibreOffice.dmg "${{ env.LIBREOFFICE_MAC_URL }}"
+          hdiutil attach /tmp/LibreOffice.dmg -mountpoint /tmp/lo_mount -nobrowse
+          # Copy LibreOffice into app bundle Resources
+          mkdir -p "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice"
+          cp -R /tmp/lo_mount/LibreOffice.app/Contents/* "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/"
+          # Create symlink for soffice in program dir
+          mkdir -p "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program"
+          if [ ! -f "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program/soffice" ]; then
+            ln -s "../MacOS/soffice" "img2pdf/build/bin/img2pdf.app/Contents/Resources/libreoffice/program/soffice"
+          fi
+          hdiutil detach /tmp/lo_mount
+          rm /tmp/LibreOffice.dmg
 
       - name: Zip macOS app
         if: runner.os == 'macOS'
-        run: cd img2pdf/build/bin && zip -r img2pdf-macos.zip img2pdf.app
+        run: cd img2pdf/build/bin && zip -r -y img2pdf-macos.zip img2pdf.app
 
       - name: Upload macOS artifact
         if: runner.os == 'macOS'
@@ -76,6 +119,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            img2pdf-windows/img2pdf.exe
+            img2pdf-windows/img2pdf-windows.zip
             img2pdf-macos/img2pdf-macos.zip
           generate_release_notes: true

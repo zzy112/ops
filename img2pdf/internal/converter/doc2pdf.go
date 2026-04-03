@@ -169,16 +169,40 @@ func DocToPDF(inputPath string, outputPath string) error {
 }
 
 func findLibreOffice() string {
+	// 1. Check bundled portable LibreOffice next to executable
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+
+		// Windows: exe_dir/libreoffice/program/soffice.exe
+		bundled := filepath.Join(exeDir, "libreoffice", "program", "soffice.exe")
+		if _, err := os.Stat(bundled); err == nil {
+			return bundled
+		}
+		// Windows: exe_dir/libreoffice/program/soffice (no ext)
+		bundled = filepath.Join(exeDir, "libreoffice", "program", "soffice")
+		if _, err := os.Stat(bundled); err == nil {
+			return bundled
+		}
+
+		// macOS .app bundle: Contents/MacOS/../Resources/libreoffice
+		bundled = filepath.Join(exeDir, "..", "Resources", "libreoffice", "program", "soffice")
+		if _, err := os.Stat(bundled); err == nil {
+			return bundled
+		}
+	}
+
+	// 2. System-installed LibreOffice
 	candidates := []string{
 		`C:\Program Files\LibreOffice\program\soffice.exe`,
 		`C:\Program Files (x86)\LibreOffice\program\soffice.exe`,
+		`/Applications/LibreOffice.app/Contents/MacOS/soffice`,
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	// Try PATH
+	// 3. Try PATH
 	if p, err := exec.LookPath("soffice"); err == nil {
 		return p
 	}
