@@ -1,0 +1,12 @@
+server:
+  port: 8080
+
+jenkins:
+  url: "http://jenkins.example.com"
+  user: "admin"
+  token: "your-api-token"
+
+harbor:
+  url: "https://harbor.example.com"
+  user: "admin"
+  password: "your-password"

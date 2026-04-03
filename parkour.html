@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>跑酷小游戏</title>
+<style>
+* { margin: 0; padding: 0; }
+body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { border-radius: 8px; box-shadow: 0 0 40px rgba(0,200,255,0.3); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = 800;
+canvas.height = 400;
+
+// 游戏状态
+let state = 'menu'; // menu, playing, over
+let score = 0;
+let highScore = +localStorage.getItem('parkourHigh') || 0;
+let speed = 6;
+let frame = 0;
+let shakeTimer = 0;
+
+// 玩家
+const player = {
+  x: 80, y: 0, w: 30, h: 40,
+  vy: 0, grounded: false, jumpCount: 0,
+  trail: [],
+  reset() {
+    this.y = groundY - this.h;
+    this.vy = 0;
+    this.grounded = true;
+    this.jumpCount = 0;
+    this.trail = [];
+  }
+};
+
+const groundY = 320;
+const gravity = 0.6;
+const jumpForce = -12;
+
+// 障碍物
+let obstacles = [];
+let particles = [];
+let clouds = [];
+let stars = [];
+
+// 初始化星星
+for (let i = 0; i < 60; i++) {
+  stars.push({ x: Math.random() * 800, y: Math.random() * 250, r: Math.random() * 2 + 0.5, twinkle: Math.random() * Math.PI * 2 });
+}
+
+// 初始化云
+for (let i = 0; i < 4; i++) {
+  clouds.push({ x: Math.random() * 900, y: 30 + Math.random() * 100, w: 60 + Math.random() * 80, speed: 0.3 + Math.random() * 0.5 });
+}
+
+function spawnObstacle() {
+  const types = ['box', 'spike', 'tall', 'double'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  let o = { x: 850, type };
+  switch (type) {
+    case 'box':    o.w = 30; o.h = 30; o.y = groundY - 30; break;
+    case 'spike':  o.w = 24; o.h = 35; o.y = groundY - 35; break;
+    case 'tall':   o.w = 20; o.h = 60; o.y = groundY - 60; break;
+    case 'double': o.w = 50; o.h = 25; o.y = groundY - 25; break;
+  }
+  obstacles.push(o);
+}
+
+function reset() {
+  obstacles = [];
+  particles = [];
+  score = 0;
+  speed = 6;
+  frame = 0;
+  shakeTimer = 0;
+  player.reset();
+}
+
+function jump() {
+  if (state === 'menu') { state = 'playing'; reset(); return; }
+  if (state === 'over') { state = 'playing'; reset(); return; }
+  if (player.jumpCount < 2) {
+    player.vy = jumpForce * (player.jumpCount === 1 ? 0.85 : 1);
+    player.jumpCount++;
+    player.grounded = false;
+    // 跳跃粒子
+    for (let i = 0; i < 6; i++) {
+      particles.push({
+        x: player.x + player.w / 2, y: player.y + player.h,
+        vx: (Math.random() - 0.5) * 3, vy: Math.random() * 2 + 1,
+        life: 20 + Math.random() * 10, color: player.jumpCount === 2 ? '#ff6b6b' : '#4ecdc4'
+      });
+    }
+  }
+}
+
+// 输入
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { e.preventDefault(); jump(); }
+});
+canvas.addEventListener('click', jump);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); jump(); });
+
+function collide(a, b) {
+  const shrink = 4;
+  return a.x + shrink < b.x + b.w - shrink && a.x + a.w - shrink > b.x + shrink &&
+         a.y + shrink < b.y + b.h && a.y + a.h > b.y + shrink;
+}
+
+function update() {
+  if (state !== 'playing') return;
+  frame++;
+  score = Math.floor(frame / 3);
+  speed = 6 + score / 200;
+
+  // 玩家物理
+  player.vy += gravity;
+  player.y += player.vy;
+  if (player.y >= groundY - player.h) {
+    player.y = groundY - player.h;
+    player.vy = 0;
+    player.grounded = true;
+    player.jumpCount = 0;
+  }
+
+  // 轨迹
+  player.trail.push({ x: player.x + player.w / 2, y: player.y + player.h / 2, life: 12 });
+  if (player.trail.length > 15) player.trail.shift();
+  player.trail.forEach(t => t.life--);
+  player.trail = player.trail.filter(t => t.life > 0);
+
+  // 生成障碍
+  if (frame % Math.max(40, 80 - Math.floor(score / 30)) === 0) spawnObstacle();
+
+  // 更新障碍
+  obstacles.forEach(o => o.x -= speed);
+  obstacles = obstacles.filter(o => o.x + o.w > -50);
+
+  // 碰撞检测
+  for (const o of obstacles) {
+    if (collide(player, o)) {
+      state = 'over';
+      shakeTimer = 15;
+      if (score > highScore) { highScore = score; localStorage.setItem('parkourHigh', highScore); }
+      // 爆炸粒子
+      for (let i = 0; i < 20; i++) {
+        particles.push({
+          x: player.x + player.w / 2, y: player.y + player.h / 2,
+          vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8,
+          life: 30 + Math.random() * 20, color: ['#ff6b6b', '#ffd93d', '#ff8a5c', '#fff'][Math.floor(Math.random() * 4)]
+        });
+      }
+      break;
+    }
+  }
+
+  // 粒子
+  particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life--; });
+  particles = particles.filter(p => p.life > 0);
+
+  // 云
+  clouds.forEach(c => { c.x -= c.speed; if (c.x + c.w < 0) { c.x = 850; c.y = 30 + Math.random() * 100; } });
+
+  if (shakeTimer > 0) shakeTimer--;
+}
+
+function drawPlayer() {
+  // 轨迹
+  player.trail.forEach(t => {
+    ctx.globalAlpha = t.life / 12 * 0.3;
+    ctx.fillStyle = '#4ecdc4';
+    ctx.fillRect(t.x - 4, t.y - 4, 8, 8);
+  });
+  ctx.globalAlpha = 1;
+
+  const px = player.x, py = player.y;
+
+  // 身体
+  ctx.fillStyle = '#4ecdc4';
+  ctx.fillRect(px + 4, py + 10, 22, 18);
+
+  // 头
+  ctx.fillStyle = '#45b7aa';
+  ctx.beginPath();
+  ctx.arc(px + 15, py + 10, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 眼睛
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(px + 17, py + 6, 5, 5);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(px + 19, py + 7, 3, 3);
+
+  // 腿 - 跑步动画
+  ctx.fillStyle = '#3a9e93';
+  if (player.grounded) {
+    const legAnim = Math.sin(frame * 0.3) * 6;
+    ctx.fillRect(px + 6, py + 28, 6, 12 + legAnim);
+    ctx.fillRect(px + 18, py + 28, 6, 12 - legAnim);
+  } else {
+    // 空中姿态
+    ctx.fillRect(px + 6, py + 28, 6, 8);
+    ctx.fillRect(px + 18, py + 26, 6, 10);
+  }
+}
+
+function drawObstacle(o) {
+  switch (o.type) {
+    case 'box':
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+      ctx.fillStyle = '#c0392b';
+      ctx.fillRect(o.x + 3, o.y + 3, o.w - 6, o.h - 6);
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillRect(o.x + 8, o.y + 8, o.w - 16, o.h - 16);
+      break;
+    case 'spike':
+      ctx.fillStyle = '#e67e22';
+      ctx.beginPath();
+      ctx.moveTo(o.x + o.w / 2, o.y);
+      ctx.lineTo(o.x + o.w, o.y + o.h);
+      ctx.lineTo(o.x, o.y + o.h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#f39c12';
+      ctx.beginPath();
+      ctx.moveTo(o.x + o.w / 2, o.y + 8);
+      ctx.lineTo(o.x + o.w - 5, o.y + o.h);
+      ctx.lineTo(o.x + 5, o.y + o.h);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'tall':
+      ctx.fillStyle = '#9b59b6';
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+      ctx.fillStyle = '#8e44ad';
+      for (let i = 0; i < 3; i++) ctx.fillRect(o.x + 3, o.y + 5 + i * 20, o.w - 6, 10);
+      break;
+    case 'double':
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillRect(o.x, o.y, 20, o.h);
+      ctx.fillRect(o.x + 30, o.y, 20, o.h);
+      break;
+  }
+}
+
+function draw() {
+  // 屏幕震动
+  ctx.save();
+  if (shakeTimer > 0) ctx.translate((Math.random() - 0.5) * shakeTimer, (Math.random() - 0.5) * shakeTimer);
+
+  // 背景渐变
+  const grad = ctx.createLinearGradient(0, 0, 0, 400);
+  grad.addColorStop(0, '#0f0c29');
+  grad.addColorStop(0.5, '#302b63');
+  grad.addColorStop(1, '#24243e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 800, 400);
+
+  // 星星
+  stars.forEach(s => {
+    ctx.globalAlpha = 0.5 + Math.sin(frame * 0.02 + s.twinkle) * 0.4;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  // 云
+  clouds.forEach(c => {
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, c.w / 2, 15, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(c.x - c.w * 0.25, c.y + 5, c.w * 0.3, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // 远景山
+  ctx.fillStyle = 'rgba(100,80,150,0.3)';
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+  for (let i = 0; i <= 800; i += 80) {
+    ctx.lineTo(i, groundY - 40 - Math.sin(i * 0.008 + frame * 0.002) * 30);
+  }
+  ctx.lineTo(800, groundY);
+  ctx.fill();
+
+  // 地面
+  ctx.fillStyle = '#16213e';
+  ctx.fillRect(0, groundY, 800, 80);
+
+  // 地面线条
+  ctx.strokeStyle = 'rgba(78,205,196,0.3)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+  ctx.lineTo(800, groundY);
+  ctx.stroke();
+
+  // 地面网格动画
+  ctx.strokeStyle = 'rgba(78,205,196,0.1)';
+  ctx.lineWidth = 1;
+  const gridOffset = (frame * speed) % 40;
+  for (let i = -gridOffset; i < 820; i += 40) {
+    ctx.beginPath();
+    ctx.moveTo(i, groundY);
+    ctx.lineTo(i - 20, 400);
+    ctx.stroke();
+  }
+
+  // 障碍物
+  obstacles.forEach(drawObstacle);
+
+  // 玩家
+  if (state !== 'over') drawPlayer();
+
+  // 粒子
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life / 40;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+  });
+  ctx.globalAlpha = 1;
+
+  // 分数
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px "Segoe UI", sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(`分数: ${score}`, 780, 35);
+  ctx.font = '14px "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText(`最高: ${highScore}`, 780, 55);
+
+  // 菜单/结束画面
+  if (state === 'menu') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, 800, 400);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#4ecdc4';
+    ctx.font = 'bold 48px "Segoe UI", sans-serif';
+    ctx.fillText('跑 酷', 400, 160);
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px "Segoe UI", sans-serif';
+    ctx.fillText('按空格键 / 点击屏幕 开始', 400, 220);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '16px "Segoe UI", sans-serif';
+    ctx.fillText('支持二段跳', 400, 260);
+  }
+
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, 800, 400);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff6b6b';
+    ctx.font = 'bold 42px "Segoe UI", sans-serif';
+    ctx.fillText('游戏结束', 400, 150);
+    ctx.fillStyle = '#fff';
+    ctx.font = '24px "Segoe UI", sans-serif';
+    ctx.fillText(`得分: ${score}`, 400, 200);
+    if (score >= highScore && score > 0) {
+      ctx.fillStyle = '#ffd93d';
+      ctx.font = '18px "Segoe UI", sans-serif';
+      ctx.fillText('新纪录!', 400, 235);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '18px "Segoe UI", sans-serif';
+    ctx.fillText('点击或按空格键重新开始', 400, 280);
+  }
+
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+player.reset();
+loop();
+</script>
+</body>
+</html>

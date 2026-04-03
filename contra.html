@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>魂斗罗 - Contra</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+canvas { border: 2px solid #333; image-rendering: pixelated; }
+#ui { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); color: #fff; font-family: 'Courier New', monospace; font-size: 16px; text-align: center; z-index: 10; }
+#ui span { margin: 0 20px; }
+#start-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: rgba(0,0,0,0.85); color: #fff; font-family: 'Courier New', monospace; z-index: 20; }
+#start-screen h1 { font-size: 48px; color: #e44; margin-bottom: 20px; text-shadow: 3px 3px #800; }
+#start-screen p { font-size: 18px; margin: 5px 0; color: #aaa; }
+#start-screen .blink { animation: blink 1s infinite; color: #ff0; font-size: 22px; margin-top: 30px; }
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+#game-over { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: #e44; font-size: 48px; font-family: 'Courier New', monospace; z-index: 20; text-shadow: 3px 3px #800; }
+</style>
+</head>
+<body>
+<div id="ui"><span id="score-display">SCORE: 0</span><span id="lives-display">LIVES: 3</span></div>
+<canvas id="game" width="800" height="500"></canvas>
+<div id="start-screen">
+  <h1>CONTRA</h1>
+  <p>方向键 / WASD 移动跳跃</p>
+  <p>J / 空格 射击 | 武器可升级(吃同类道具)</p>
+  <p class="blink">按 ENTER 开始游戏</p>
+</div>
+<div id="game-over">GAME OVER<br><span style="font-size:20px;color:#aaa">按 ENTER 重新开始</span></div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GRAVITY = 0.6, GROUND_Y = H - 60;
+
+// Game state
+let gameState = 'start'; // start, playing, gameover
+let score = 0, lives = 3;
+let cameraX = 0;
+let bullets = [], enemies = [], particles = [], platforms = [], powerups = [];
+let enemyTimer = 0, bgStars = [];
+let boss = null, bossTriggered = false;
+let keys = {};
+const LEVEL_LEN = 10000;
+
+// Generate background stars
+for (let i = 0; i < 500; i++) bgStars.push({ x: Math.random() * 10000, y: Math.random() * H * 0.7, s: Math.random() * 2 + 1, b: Math.random() });
+
+// Generate platforms for the level
+function generateLevel() {
+  platforms = [];
+  powerups = [];
+  boss = null;
+  bossTriggered = false;
+  // Ground segments with gaps (never consecutive, max 1 segment wide)
+  let lastWasGap = false;
+  for (let x = 0; x < LEVEL_LEN; x += 120) {
+    // Boss arena: solid ground from LEVEL_LEN-800 onward
+    if (x >= LEVEL_LEN - 800) {
+      platforms.push({ x, y: GROUND_Y, w: 120, h: 60, type: 'ground' });
+      lastWasGap = false;
+      continue;
+    }
+    let isGap = !lastWasGap && x >= 500 && Math.random() < 0.12;
+    if (isGap) {
+      lastWasGap = true;
+    } else {
+      platforms.push({ x, y: GROUND_Y, w: 120, h: 60, type: 'ground' });
+      lastWasGap = false;
+    }
+  }
+  // Elevated platforms
+  for (let x = 300; x < LEVEL_LEN - 900; x += Math.random() * 300 + 200) {
+    let py = GROUND_Y - Math.random() * 120 - 80;
+    platforms.push({ x, y: py, w: Math.random() * 80 + 60, h: 16, type: 'platform' });
+  }
+  // Some power-ups on platforms — 5 weapon types
+  platforms.filter(p => p.type === 'platform').forEach((p, i) => {
+    if (i % 2 === 0) powerups.push({ x: p.x + p.w / 2 - 8, y: p.y - 20, w: 16, h: 16, type: ['S', 'R', 'M', 'T', 'L'][Math.floor(Math.random() * 5)], collected: false });
+  });
+  // Also some on ground
+  for (let x = 600; x < LEVEL_LEN - 900; x += Math.random() * 400 + 300) {
+    powerups.push({ x, y: GROUND_Y - 20, w: 16, h: 16, type: ['S', 'R', 'M', 'T', 'L'][Math.floor(Math.random() * 5)], collected: false });
+  }
+  // Warning sign before boss
+  platforms.push({ x: LEVEL_LEN - 900, y: GROUND_Y - 60, w: 40, h: 40, type: 'warning' });
+}
+
+// Player
+const player = {
+  x: 100, y: GROUND_Y - 40, w: 24, h: 38, vx: 0, vy: 0,
+  onGround: false, facing: 1, shooting: false, shootTimer: 0,
+  invincible: 0, weapon: 'N', weaponLv: 1, frame: 0, frameTimer: 0,
+  aimDir: { x: 1, y: 0 },
+  reset() {
+    this.x = 100; this.y = GROUND_Y - 40; this.vx = 0; this.vy = 0;
+    this.onGround = false; this.facing = 1; this.weapon = 'N'; this.weaponLv = 1; this.invincible = 60;
+  }
+};
+
+// Input
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === 'Enter') {
+    if (gameState === 'start') { gameState = 'playing'; document.getElementById('start-screen').style.display = 'none'; generateLevel(); }
+    else if (gameState === 'gameover' || gameState === 'win') { gameState = 'playing'; document.getElementById('game-over').style.display = 'none'; score = 0; lives = 3; cameraX = 0; player.reset(); enemies = []; bullets = []; particles = []; generateLevel(); }
+  }
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+function isKey(action) {
+  switch (action) {
+    case 'left': return keys['a'] || keys['arrowleft'];
+    case 'right': return keys['d'] || keys['arrowright'];
+    case 'up': return keys['w'] || keys['arrowup'];
+    case 'down': return keys['s'] || keys['arrowdown'];
+    case 'jump': return keys['w'] || keys['arrowup'];
+    case 'shoot': return keys['j'] || keys[' '];
+  }
+}
+
+// Collision
+function rectCollide(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// Spawn enemy
+function spawnEnemy() {
+  let ex = cameraX + W + 20;
+  let types = ['soldier', 'runner', 'turret'];
+  let type = types[Math.floor(Math.random() * types.length)];
+  let ey = GROUND_Y - 36;
+  // Find a ground platform near spawn
+  for (let p of platforms) {
+    if (p.x <= ex && p.x + p.w >= ex) { ey = p.y - 36; break; }
+  }
+  let e = { x: ex, y: ey, w: 22, h: 36, vx: -1, vy: 0, hp: type === 'turret' ? 3 : 1, type, onGround: false, shootTimer: Math.random() * 60 + 30, frame: 0 };
+  if (type === 'runner') { e.vx = -2.5; e.h = 30; e.y = ey + 6; }
+  if (type === 'turret') { e.vx = 0; e.w = 28; e.h = 28; e.y = ey + 8; }
+  enemies.push(e);
+}
+
+// Create bullet — supports weapon types and levels
+function shoot(x, y, dx, dy, fromPlayer, wType, wLv) {
+  let speed = fromPlayer ? 8 : 3.5;
+  let len = Math.sqrt(dx * dx + dy * dy) || 1;
+  let ndx = dx / len, ndy = dy / len;
+  if (!fromPlayer) {
+    bullets.push({ x, y, vx: ndx * speed, vy: ndy * speed, fromPlayer, life: 120, w: 5, h: 5, wType: 'enemy', wLv: 1, dmg: 1 });
+    return;
+  }
+  wType = wType || 'N'; wLv = wLv || 1;
+  let dmg = wLv; // higher level = more damage
+  if (wType === 'N') {
+    // Normal: lv1=1 bullet, lv2=2 parallel, lv3=3 parallel
+    let perp_x = -ndy, perp_y = ndx;
+    let count = wLv;
+    let offsets = count === 1 ? [0] : count === 2 ? [-3, 3] : [-5, 0, 5];
+    for (let off of offsets) {
+      bullets.push({ x: x + perp_x * off, y: y + perp_y * off, vx: ndx * speed, vy: ndy * speed, fromPlayer: true, life: 100, w: 6, h: 3, wType: 'N', wLv, dmg: 1 });
+    }
+  } else if (wType === 'S') {
+    // Spread: lv1=3 bullets, lv2=5, lv3=7 fan
+    let count = 1 + wLv * 2;
+    let totalAngle = 0.3 + wLv * 0.15;
+    for (let i = 0; i < count; i++) {
+      let a = -totalAngle + (totalAngle * 2 / (count - 1)) * i;
+      if (count === 1) a = 0;
+      let cos = Math.cos(a), sin = Math.sin(a);
+      bullets.push({ x, y, vx: (ndx * cos - ndy * sin) * speed, vy: (ndx * sin + ndy * cos) * speed, fromPlayer: true, life: 60 + wLv * 10, w: 5, h: 5, wType: 'S', wLv, dmg });
+    }
+  } else if (wType === 'R') {
+    // Rapid: lv1=fast single, lv2=faster+bigger, lv3=fastest+piercing
+    let rSpeed = speed + wLv * 2;
+    bullets.push({ x, y, vx: ndx * rSpeed, vy: ndy * rSpeed, fromPlayer: true, life: 100, w: 4 + wLv * 2, h: 3, wType: 'R', wLv, dmg, pierce: wLv >= 3 });
+  } else if (wType === 'M') {
+    // Machine gun: lv1=fast fire, lv2=double, lv3=triple stream with slight spread
+    let count = wLv;
+    for (let i = 0; i < count; i++) {
+      let spread = (Math.random() - 0.5) * 0.15 * wLv;
+      let cos = Math.cos(spread), sin = Math.sin(spread);
+      bullets.push({ x, y, vx: (ndx * cos - ndy * sin) * speed * 1.2, vy: (ndx * sin + ndy * cos) * speed * 1.2, fromPlayer: true, life: 80, w: 5, h: 3, wType: 'M', wLv, dmg: Math.ceil(wLv / 2) });
+    }
+  } else if (wType === 'T') {
+    // Tracking: lv1=slow homing, lv2=faster homing, lv3=fast+splits on hit
+    let tSpeed = 4 + wLv;
+    bullets.push({ x, y, vx: ndx * tSpeed, vy: ndy * tSpeed, fromPlayer: true, life: 150 + wLv * 30, w: 6, h: 6, wType: 'T', wLv, dmg, turnRate: 0.04 + wLv * 0.02 });
+  } else if (wType === 'L') {
+    // Laser: lv1=short beam, lv2=longer+wider, lv3=penetrating thick beam
+    let laserLen = 120 + wLv * 80;
+    bullets.push({ x, y, vx: ndx, vy: ndy, fromPlayer: true, life: 8, w: laserLen, h: 2 + wLv * 2, wType: 'L', wLv, dmg: wLv * 2, laserLen, pierce: true, lx: x, ly: y, ldx: ndx, ldy: ndy });
+  }
+}
+
+// Particles
+function explode(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    let angle = Math.random() * Math.PI * 2;
+    let speed = Math.random() * 3 + 1;
+    particles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 2, life: 20 + Math.random() * 20, color });
+  }
+}
+
+// Update
+function update() {
+  if (gameState !== 'playing') return;
+
+  // Player movement
+  let moveX = 0;
+  if (isKey('left')) { moveX = -1; player.facing = -1; }
+  if (isKey('right')) { moveX = 1; player.facing = 1; }
+
+  player.vx = moveX * 3.5;
+
+  // Aim direction (8-way)
+  let ax = 0, ay = 0;
+  if (isKey('left')) ax = -1;
+  if (isKey('right')) ax = 1;
+  if (isKey('up')) ay = -1;
+  if (isKey('down')) ay = 1;
+  if (ax === 0 && ay === 0) { ax = player.facing; ay = 0; }
+  player.aimDir = { x: ax, y: ay };
+
+  // Jump
+  if (isKey('jump') && player.onGround) { player.vy = -11; player.onGround = false; }
+
+  // Gravity
+  player.vy += GRAVITY;
+  player.x += player.vx;
+  player.y += player.vy;
+
+  // Platform collision
+  player.onGround = false;
+  for (let p of platforms) {
+    if (player.x + player.w > p.x && player.x < p.x + p.w) {
+      if (player.vy >= 0 && player.y + player.h > p.y && player.y + player.h < p.y + p.h + 12) {
+        // Don't land on thin platforms when pressing down
+        if (p.type === 'platform' && isKey('down')) continue;
+        player.y = p.y - player.h;
+        player.vy = 0;
+        player.onGround = true;
+      }
+    }
+  }
+
+  // Fall death
+  if (player.y > H + 50) { playerDie(); }
+
+  // Shooting
+  player.shootTimer--;
+  let fireRates = { N: 10, S: 18, R: [6,4,3], M: [4,3,2], T: [25,20,15], L: [30,25,18] };
+  let fr = fireRates[player.weapon];
+  let fireRate = Array.isArray(fr) ? fr[player.weaponLv - 1] : fr;
+  if (isKey('shoot') && player.shootTimer <= 0) {
+    player.shootTimer = fireRate;
+    let bx = player.x + player.w / 2 + player.facing * 12;
+    let by = player.y + 12;
+    shoot(bx, by, player.aimDir.x, player.aimDir.y, true, player.weapon, player.weaponLv);
+  }
+
+  // Invincibility
+  if (player.invincible > 0) player.invincible--;
+
+  // Animation
+  player.frameTimer++;
+  if (player.frameTimer > 6) { player.frame = (player.frame + 1) % 4; player.frameTimer = 0; }
+
+  // Camera
+  let targetCam = player.x - W * 0.35;
+  cameraX += (targetCam - cameraX) * 0.08;
+  if (cameraX < 0) cameraX = 0;
+  // Lock camera in boss arena
+  if (bossTriggered) {
+    let bossArenaStart = LEVEL_LEN - 800 - 50;
+    if (cameraX < bossArenaStart) cameraX = bossArenaStart;
+    if (cameraX > LEVEL_LEN - W) cameraX = LEVEL_LEN - W;
+    // Lock player in arena
+    if (player.x < bossArenaStart + 10) player.x = bossArenaStart + 10;
+    if (player.x + player.w > LEVEL_LEN - 20) player.x = LEVEL_LEN - 20 - player.w;
+  }
+
+  // Enemies — stop spawning in boss area
+  enemyTimer--;
+  if (enemyTimer <= 0 && !bossTriggered) { spawnEnemy(); enemyTimer = 80 + Math.random() * 60; }
+
+  // Boss trigger
+  if (!bossTriggered && player.x > LEVEL_LEN - 800) {
+    bossTriggered = true;
+    enemies = []; // clear remaining enemies
+    boss = {
+      x: LEVEL_LEN - 300, y: GROUND_Y - 70, w: 120, h: 70,
+      hp: 80, maxHp: 80, phase: 1,
+      vx: -1, moveTimer: 0, moveDir: -1,
+      shootTimer: 40, specialTimer: 200,
+      flashTimer: 0, shakeX: 0, shakeY: 0,
+      cannonAngle: 0, exhaustTimer: 0
+    };
+  }
+
+  // Boss update
+  if (boss && boss.hp > 0) {
+    // Phase based on HP
+    boss.phase = boss.hp > boss.maxHp * 0.5 ? 1 : boss.hp > boss.maxHp * 0.2 ? 2 : 3;
+
+    // Movement: patrol back and forth in boss arena
+    boss.moveTimer++;
+    let speed = boss.phase === 3 ? 2 : boss.phase === 2 ? 1.5 : 1;
+    boss.x += boss.moveDir * speed;
+    let arenaLeft = LEVEL_LEN - 780, arenaRight = LEVEL_LEN - 150;
+    if (boss.x < arenaLeft) { boss.moveDir = 1; }
+    if (boss.x + boss.w > arenaRight) { boss.moveDir = -1; }
+
+    // Cannon aim at player
+    let bdx = player.x - (boss.x + boss.w / 2);
+    let bdy = player.y - (boss.y + 10);
+    boss.cannonAngle = Math.atan2(bdy, bdx);
+
+    // Main cannon shooting
+    boss.shootTimer--;
+    let fireInterval = boss.phase === 3 ? 15 : boss.phase === 2 ? 25 : 40;
+    if (boss.shootTimer <= 0) {
+      boss.shootTimer = fireInterval;
+      let cx = boss.x + boss.w / 2 + Math.cos(boss.cannonAngle) * 30;
+      let cy = boss.y + 10 + Math.sin(boss.cannonAngle) * 30;
+      shoot(cx, cy, bdx, bdy, false);
+      if (boss.phase >= 2) {
+        // Double shot
+        let spread = 0.15;
+        shoot(cx, cy, bdx * Math.cos(spread) - bdy * Math.sin(spread), bdx * Math.sin(spread) + bdy * Math.cos(spread), false);
+      }
+      if (boss.phase >= 3) {
+        // Triple
+        let spread = -0.15;
+        shoot(cx, cy, bdx * Math.cos(spread) - bdy * Math.sin(spread), bdx * Math.sin(spread) + bdy * Math.cos(spread), false);
+      }
+      explode(cx, cy, '#fa0', 3);
+    }
+
+    // Special attack: mortar barrage
+    boss.specialTimer--;
+    if (boss.specialTimer <= 0) {
+      boss.specialTimer = boss.phase === 3 ? 100 : boss.phase === 2 ? 150 : 200;
+      // Lob 3-5 mortar shells that arc down
+      let count = 2 + boss.phase;
+      for (let i = 0; i < count; i++) {
+        let tx = player.x + (Math.random() - 0.5) * 200;
+        let sx = boss.x + boss.w / 2;
+        let sy = boss.y;
+        bullets.push({ x: sx, y: sy, vx: (tx - sx) / 60, vy: -6 - Math.random() * 2, fromPlayer: false, life: 120, w: 8, h: 8, wType: 'mortar', wLv: 1, dmg: 1, gravity: true });
+      }
+      explode(boss.x + boss.w / 2, boss.y, '#f80', 8);
+    }
+
+    // Exhaust particles
+    boss.exhaustTimer++;
+    if (boss.exhaustTimer % 3 === 0) {
+      particles.push({ x: boss.x + boss.w - 5, y: boss.y + boss.h - 10, vx: 1 + Math.random(), vy: -Math.random() * 2, life: 15, color: '#555' });
+      particles.push({ x: boss.x + 5, y: boss.y + boss.h - 10, vx: -1 - Math.random(), vy: -Math.random() * 2, life: 15, color: '#555' });
+    }
+
+    // Flash timer
+    if (boss.flashTimer > 0) boss.flashTimer--;
+    boss.shakeX = boss.flashTimer > 0 ? (Math.random() - 0.5) * 4 : 0;
+    boss.shakeY = boss.flashTimer > 0 ? (Math.random() - 0.5) * 4 : 0;
+
+    // Boss bullet collision
+    for (let b of bullets) {
+      if (!b.fromPlayer || b.life <= 0) continue;
+      let bossRect = { x: boss.x, y: boss.y, w: boss.w, h: boss.h };
+      if (b.wType === 'L') {
+        // Laser check
+        let steps = Math.ceil(b.laserLen / 10);
+        for (let s = 0; s <= steps; s++) {
+          let px = b.lx + b.ldx * (b.laserLen * s / steps);
+          let py = b.ly + b.ldy * (b.laserLen * s / steps);
+          if (px > boss.x && px < boss.x + boss.w && py > boss.y && py < boss.y + boss.h) {
+            if (b.life === 8) { boss.hp -= b.dmg; boss.flashTimer = 6; }
+            break;
+          }
+        }
+      } else if (rectCollide(b, bossRect)) {
+        boss.hp -= (b.dmg || 1);
+        boss.flashTimer = 6;
+        if (!b.pierce) b.life = 0;
+        explode(b.x, b.y, '#fa0', 3);
+      }
+    }
+
+    // Boss-player collision
+    if (player.invincible <= 0) {
+      let bossRect = { x: boss.x, y: boss.y, w: boss.w, h: boss.h };
+      if (rectCollide(player, bossRect)) playerDie();
+    }
+
+    // Boss death
+    if (boss.hp <= 0) {
+      score += 5000;
+      for (let i = 0; i < 50; i++) {
+        explode(boss.x + Math.random() * boss.w, boss.y + Math.random() * boss.h, ['#f44', '#fa0', '#ff0', '#fff'][Math.floor(Math.random() * 4)], 5);
+      }
+      boss = null;
+      // Victory!
+      gameState = 'win';
+      document.getElementById('game-over').innerHTML = '<span style="color:#ff0">YOU WIN!</span><br><span style="font-size:20px;color:#aaa">SCORE: ' + score + '<br>按 ENTER 重新开始</span>';
+      document.getElementById('game-over').style.display = 'block';
+    }
+  }
+
+  for (let e of enemies) {
+    e.vy += GRAVITY * 0.8;
+    e.x += e.vx;
+    e.y += e.vy;
+    e.onGround = false;
+    for (let p of platforms) {
+      if (e.x + e.w > p.x && e.x < p.x + p.w && e.vy >= 0 && e.y + e.h > p.y && e.y + e.h < p.y + p.h + 10) {
+        e.y = p.y - e.h; e.vy = 0; e.onGround = true;
+      }
+    }
+    // Enemy shooting
+    e.shootTimer--;
+    if (e.shootTimer <= 0 && e.type !== 'runner') {
+      e.shootTimer = e.type === 'turret' ? 50 : 90;
+      let dx = player.x - e.x, dy = player.y - e.y;
+      shoot(e.x + e.w / 2, e.y + 10, dx, dy, false);
+    }
+    // Remove off-screen enemies
+    if (e.x < cameraX - 100) e.hp = 0;
+  }
+
+  // Bullets
+  for (let b of bullets) {
+    // Mortar gravity
+    if (b.gravity) b.vy += 0.15;
+    // Tracking bullet homing logic
+    if (b.wType === 'T' && b.fromPlayer && enemies.length > 0) {
+      let closest = null, closestDist = Infinity;
+      for (let e of enemies) {
+        if (e.hp <= 0) continue;
+        let dist = Math.hypot(e.x - b.x, e.y - b.y);
+        if (dist < closestDist) { closestDist = dist; closest = e; }
+      }
+      if (closest && closestDist < 400) {
+        let targetAngle = Math.atan2(closest.y + closest.h / 2 - b.y, closest.x + closest.w / 2 - b.x);
+        let currentAngle = Math.atan2(b.vy, b.vx);
+        let diff = targetAngle - currentAngle;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        let turn = Math.sign(diff) * Math.min(Math.abs(diff), b.turnRate);
+        let spd = Math.hypot(b.vx, b.vy);
+        let newAngle = currentAngle + turn;
+        b.vx = Math.cos(newAngle) * spd;
+        b.vy = Math.sin(newAngle) * spd;
+      }
+      // Trail particles for tracking bullets
+      if (Math.random() < 0.5) particles.push({ x: b.x, y: b.y, vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5, life: 10, color: '#f0f' });
+    }
+    // Laser: don't move, just tick down
+    if (b.wType === 'L' && b.fromPlayer) {
+      // Laser hits all enemies along the beam
+      for (let e of enemies) {
+        if (e.hp <= 0) continue;
+        // Line-rect intersection check
+        let ex = e.x, ey = e.y, ew = e.w, eh = e.h;
+        let steps = Math.ceil(b.laserLen / 10);
+        for (let s = 0; s <= steps; s++) {
+          let px = b.lx + b.ldx * (b.laserLen * s / steps);
+          let py = b.ly + b.ldy * (b.laserLen * s / steps);
+          if (px > ex && px < ex + ew && py > ey && py < ey + eh) {
+            if (b.life === 8) { // only damage on first frame
+              e.hp -= b.dmg;
+              explode(e.x + e.w / 2, e.y + e.h / 2, '#0ff', 5);
+              if (e.hp <= 0) { score += e.type === 'turret' ? 300 : 100; explode(e.x + e.w / 2, e.y + e.h / 2, '#fff', 15); }
+            }
+            break;
+          }
+        }
+      }
+      b.life--;
+      continue; // don't move laser
+    }
+    b.x += b.vx; b.y += b.vy; b.life--;
+    if (b.fromPlayer && b.wType !== 'L') {
+      for (let e of enemies) {
+        if (e.hp <= 0 || !rectCollide(b, e)) continue;
+        e.hp -= (b.dmg || 1);
+        if (!b.pierce) b.life = 0;
+        explode(e.x + e.w / 2, e.y + e.h / 2, '#fa0', 5);
+        if (e.hp <= 0) {
+          score += e.type === 'turret' ? 300 : 100;
+          explode(e.x + e.w / 2, e.y + e.h / 2, '#f44', 15);
+          // Tracking lv3: split on kill
+          if (b.wType === 'T' && b.wLv >= 3) {
+            for (let a = 0; a < Math.PI * 2; a += Math.PI / 2) {
+              bullets.push({ x: e.x + e.w / 2, y: e.y + e.h / 2, vx: Math.cos(a) * 5, vy: Math.sin(a) * 5, fromPlayer: true, life: 40, w: 4, h: 4, wType: 'T', wLv: 1, dmg: 1, turnRate: 0.06 });
+            }
+          }
+        }
+        if (!b.pierce) break;
+      }
+    } else if (!b.fromPlayer) {
+      if (player.invincible <= 0 && rectCollide(b, player)) { b.life = 0; playerDie(); }
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0 && (b.wType === 'L' || (b.x > cameraX - 20 && b.x < cameraX + W + 20)));
+  enemies = enemies.filter(e => e.hp > 0);
+
+  // Player-enemy collision
+  if (player.invincible <= 0) {
+    for (let e of enemies) {
+      if (rectCollide(player, e)) { playerDie(); break; }
+    }
+  }
+
+  // Power-ups (with upgrade logic)
+  for (let p of powerups) {
+    if (!p.collected && rectCollide(player, p)) {
+      p.collected = true;
+      if (player.weapon === p.type && player.weaponLv < 3) {
+        // Same weapon: upgrade
+        player.weaponLv++;
+        score += 500 * player.weaponLv;
+        explode(p.x + 8, p.y + 8, '#ff0', 15);
+      } else if (player.weapon !== p.type) {
+        // Different weapon: switch, reset to lv1
+        player.weapon = p.type;
+        player.weaponLv = 1;
+        score += 500;
+        explode(p.x + 8, p.y + 8, '#0ff', 10);
+      } else {
+        // Already max level same weapon: just score
+        score += 1000;
+        explode(p.x + 8, p.y + 8, '#ff0', 20);
+      }
+    }
+  }
+
+  // Particles
+  for (let p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+
+  // UI
+  document.getElementById('score-display').textContent = 'SCORE: ' + score;
+  document.getElementById('lives-display').textContent = 'LIVES: ' + lives;
+}
+
+function playerDie() {
+  lives--;
+  explode(player.x + player.w / 2, player.y + player.h / 2, '#f44', 20);
+  if (lives <= 0) {
+    gameState = 'gameover';
+    document.getElementById('game-over').style.display = 'block';
+  } else {
+    player.reset();
+    player.x = cameraX + 100;
+    // Find ground
+    for (let p of platforms) {
+      if (p.x <= player.x && p.x + p.w >= player.x) { player.y = p.y - player.h; break; }
+    }
+  }
+}
+
+// Draw
+function draw() {
+  ctx.fillStyle = '#0a0a2e';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(-cameraX, 0);
+
+  // Stars (parallax)
+  for (let s of bgStars) {
+    let sx = s.x - cameraX * 0.3;
+    if (sx > -10 && sx < W + 10) {
+      ctx.fillStyle = `rgba(255,255,255,${0.3 + s.b * 0.7})`;
+      ctx.fillRect(s.x - cameraX * 0.7 + cameraX, s.y, s.s, s.s);
+    }
+  }
+
+  // Mountains (parallax)
+  ctx.fillStyle = '#1a1a3a';
+  for (let i = 0; i < 20; i++) {
+    let mx = i * 250 - (cameraX * 0.2) % 250;
+    drawTriangle(mx + cameraX, GROUND_Y + 60, 200, 120 + (i % 3) * 40);
+  }
+  ctx.fillStyle = '#12122a';
+  for (let i = 0; i < 25; i++) {
+    let mx = i * 180 - (cameraX * 0.4) % 180;
+    drawTriangle(mx + cameraX, GROUND_Y + 60, 140, 80 + (i % 3) * 30);
+  }
+
+  // Platforms
+  for (let p of platforms) {
+    if (p.x + p.w < cameraX - 10 || p.x > cameraX + W + 10) continue;
+    if (p.type === 'ground') {
+      ctx.fillStyle = '#3a5a2a';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#5a8a3a';
+      ctx.fillRect(p.x, p.y, p.w, 6);
+      // Grass tufts
+      ctx.fillStyle = '#6a9a4a';
+      for (let gx = p.x + 5; gx < p.x + p.w - 5; gx += 12) {
+        ctx.fillRect(gx, p.y - 3, 3, 5);
+        ctx.fillRect(gx + 5, p.y - 2, 2, 4);
+      }
+    } else {
+      ctx.fillStyle = '#666';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#888';
+      ctx.fillRect(p.x, p.y, p.w, 4);
+    }
+  }
+
+  // Warning sign
+  for (let p of platforms) {
+    if (p.type === 'warning' && p.x + p.w > cameraX && p.x < cameraX + W) {
+      ctx.fillStyle = '#ff0';
+      ctx.font = 'bold 14px monospace';
+      ctx.fillText('!! DANGER !!', p.x - 20, p.y - 5);
+      ctx.fillStyle = '#f00';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#ff0';
+      ctx.font = 'bold 24px monospace';
+      ctx.fillText('!', p.x + 14, p.y + 30);
+    }
+  }
+
+  // Boss tank
+  if (boss && boss.hp > 0) {
+    let bx = boss.x + boss.shakeX, by = boss.y + boss.shakeY;
+    let flash = boss.flashTimer > 0 && boss.flashTimer % 2 === 0;
+
+    // Treads
+    ctx.fillStyle = flash ? '#fff' : '#444';
+    ctx.fillRect(bx - 5, by + boss.h - 16, boss.w + 10, 16);
+    ctx.fillStyle = '#333';
+    for (let tx = bx; tx < bx + boss.w; tx += 12) {
+      ctx.fillRect(tx, by + boss.h - 14, 8, 12);
+    }
+    ctx.fillStyle = '#555';
+    ctx.fillRect(bx - 3, by + boss.h - 18, boss.w + 6, 4);
+
+    // Hull
+    ctx.fillStyle = flash ? '#fff' : '#5a5';
+    ctx.fillRect(bx + 10, by + 20, boss.w - 20, 35);
+    ctx.fillStyle = flash ? '#fff' : '#484';
+    ctx.fillRect(bx + 10, by + 25, boss.w - 20, 3);
+    ctx.fillRect(bx + 10, by + 45, boss.w - 20, 3);
+    ctx.fillStyle = flash ? '#fff' : '#696';
+    ctx.fillRect(bx + 5, by + 25, 10, 28);
+    ctx.fillRect(bx + boss.w - 15, by + 25, 10, 28);
+
+    // Turret
+    ctx.fillStyle = flash ? '#fff' : '#585';
+    ctx.fillRect(bx + 25, by + 5, 70, 25);
+    ctx.fillStyle = flash ? '#fff' : '#474';
+    ctx.fillRect(bx + 30, by + 8, 60, 4);
+
+    // Main cannon
+    ctx.save();
+    ctx.translate(bx + boss.w / 2, by + 15);
+    ctx.rotate(boss.cannonAngle);
+    ctx.fillStyle = flash ? '#fff' : '#666';
+    ctx.fillRect(0, -5, 50, 10);
+    ctx.fillStyle = flash ? '#fff' : '#555';
+    ctx.fillRect(45, -7, 10, 14);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(52, -4, 5, 8);
+    ctx.restore();
+
+    // Commander hatch
+    ctx.fillStyle = flash ? '#fff' : '#696';
+    ctx.beginPath();
+    ctx.arc(bx + 45, by + 5, 8, Math.PI, 0);
+    ctx.fill();
+
+    // Phase lights
+    let phaseColor = boss.phase === 3 ? '#f00' : boss.phase === 2 ? '#fa0' : '#0f0';
+    ctx.fillStyle = phaseColor;
+    ctx.fillRect(bx + 35, by + 1, 6, 4);
+    ctx.fillRect(bx + 55, by + 1, 6, 4);
+
+    // HP bar
+    let hpRatio = boss.hp / boss.maxHp;
+    let barW = 100, barH = 8;
+    let barX = bx + boss.w / 2 - barW / 2, barY = by - 20;
+    ctx.fillStyle = '#300';
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = hpRatio > 0.5 ? '#0c0' : hpRatio > 0.2 ? '#fa0' : '#f00';
+    ctx.fillRect(barX, barY, barW * hpRatio, barH);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('BOSS', barX + 32, barY - 4);
+  }
+
+  // Power-ups (draw)
+  let weaponNames = { S: 'SPR', R: 'RAP', M: 'MCH', T: 'TRK', L: 'LAS' };
+  let weaponColors = { S: '#0ff', R: '#ff0', M: '#f80', T: '#f0f', L: '#0f0' };
+  for (let p of powerups) {
+    if (p.collected) continue;
+    let col = weaponColors[p.type] || '#f00';
+    ctx.fillStyle = col;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
+    ctx.fillStyle = col;
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText(p.type, p.x + 4, p.y + 12);
+  }
+
+  // Enemies
+  for (let e of enemies) {
+    if (e.x + e.w < cameraX - 10 || e.x > cameraX + W + 10) continue;
+    if (e.type === 'soldier') {
+      // Body
+      ctx.fillStyle = '#c33';
+      ctx.fillRect(e.x + 4, e.y + 10, 14, 16);
+      // Head
+      ctx.fillStyle = '#da8';
+      ctx.fillRect(e.x + 6, e.y, 10, 10);
+      // Helmet
+      ctx.fillStyle = '#833';
+      ctx.fillRect(e.x + 5, e.y, 12, 5);
+      // Legs
+      ctx.fillStyle = '#633';
+      ctx.fillRect(e.x + 5, e.y + 26, 5, 10);
+      ctx.fillRect(e.x + 12, e.y + 26, 5, 10);
+      // Gun
+      ctx.fillStyle = '#555';
+      ctx.fillRect(e.x - 4, e.y + 14, 10, 3);
+    } else if (e.type === 'runner') {
+      ctx.fillStyle = '#c73';
+      ctx.fillRect(e.x + 3, e.y + 8, 16, 14);
+      ctx.fillStyle = '#da8';
+      ctx.fillRect(e.x + 5, e.y, 12, 10);
+      ctx.fillStyle = '#854';
+      ctx.fillRect(e.x + 4, e.y + 22, 6, 8);
+      ctx.fillRect(e.x + 12, e.y + 22, 6, 8);
+    } else if (e.type === 'turret') {
+      ctx.fillStyle = '#888';
+      ctx.fillRect(e.x, e.y + 10, e.w, 18);
+      ctx.fillStyle = '#666';
+      ctx.fillRect(e.x + 4, e.y, 20, 14);
+      // Barrel
+      let dx = player.x - e.x, dy = player.y - e.y;
+      let a = Math.atan2(dy, dx);
+      ctx.fillStyle = '#555';
+      ctx.save();
+      ctx.translate(e.x + 14, e.y + 7);
+      ctx.rotate(a);
+      ctx.fillRect(0, -2, 18, 4);
+      ctx.restore();
+    }
+  }
+
+  // Player
+  if (gameState === 'playing' && !(player.invincible > 0 && Math.floor(player.invincible / 3) % 2)) {
+    let px = player.x, py = player.y, f = player.facing;
+    // Legs
+    ctx.fillStyle = '#36a';
+    let legOffset = player.onGround && Math.abs(player.vx) > 0 ? Math.sin(player.frame * 1.5) * 4 : 0;
+    ctx.fillRect(px + 4, py + 24, 6, 14 + legOffset);
+    ctx.fillRect(px + 14, py + 24, 6, 14 - legOffset);
+    // Boots
+    ctx.fillStyle = '#543';
+    ctx.fillRect(px + 3, py + 34 + legOffset, 8, 4);
+    ctx.fillRect(px + 13, py + 34 - legOffset, 8, 4);
+    // Body
+    ctx.fillStyle = '#48c';
+    ctx.fillRect(px + 4, py + 10, 16, 16);
+    // Head
+    ctx.fillStyle = '#eca';
+    ctx.fillRect(px + 6, py, 12, 12);
+    // Headband
+    ctx.fillStyle = '#e33';
+    ctx.fillRect(px + 5, py + 3, 14, 3);
+    // Hair
+    ctx.fillStyle = '#543';
+    ctx.fillRect(px + 6, py, 12, 3);
+    // Eye
+    ctx.fillStyle = '#000';
+    ctx.fillRect(px + (f > 0 ? 14 : 8), py + 6, 2, 2);
+    // Gun arm
+    ctx.fillStyle = '#eca';
+    let gunX = px + 12 + f * 6;
+    let gunY = py + 14;
+    ctx.fillRect(gunX - 2, gunY - 2, 6, 6);
+    // Gun
+    ctx.fillStyle = '#555';
+    let aimA = Math.atan2(player.aimDir.y, player.aimDir.x);
+    ctx.save();
+    ctx.translate(gunX + 1, gunY + 1);
+    ctx.rotate(aimA);
+    ctx.fillRect(0, -2, 14, 4);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(12, -3, 4, 6);
+    ctx.restore();
+    // Weapon indicator with level
+    if (player.weapon !== 'N') {
+      let wColors = { S: '#0ff', R: '#ff0', M: '#f80', T: '#f0f', L: '#0f0' };
+      ctx.fillStyle = wColors[player.weapon] || '#ff0';
+      ctx.font = 'bold 10px monospace';
+      let lvText = player.weapon + player.weaponLv;
+      ctx.fillText(lvText, px + 5, py - 5);
+      // Level pips
+      for (let i = 0; i < player.weaponLv; i++) {
+        ctx.fillRect(px + 5 + i * 6, py - 3, 4, 2);
+      }
+    }
+  }
+
+  // Bullets
+  let weaponBulletColors = { N: '#ff0', S: '#0ff', R: '#ff0', M: '#f80', T: '#f0f', L: '#0f0', enemy: '#f44' };
+  for (let b of bullets) {
+    let col = weaponBulletColors[b.wType] || '#ff0';
+    if (!b.fromPlayer) col = '#f44';
+    if (b.wType === 'L' && b.fromPlayer) {
+      // Laser beam
+      ctx.save();
+      ctx.globalAlpha = b.life / 8;
+      let thickness = b.h;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = thickness + 2;
+      ctx.beginPath();
+      ctx.moveTo(b.lx, b.ly);
+      ctx.lineTo(b.lx + b.ldx * b.laserLen, b.ly + b.ldy * b.laserLen);
+      ctx.stroke();
+      ctx.strokeStyle = col;
+      ctx.lineWidth = thickness;
+      ctx.beginPath();
+      ctx.moveTo(b.lx, b.ly);
+      ctx.lineTo(b.lx + b.ldx * b.laserLen, b.ly + b.ldy * b.laserLen);
+      ctx.stroke();
+      // Glow
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = thickness * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(b.lx, b.ly);
+      ctx.lineTo(b.lx + b.ldx * b.laserLen, b.ly + b.ldy * b.laserLen);
+      ctx.stroke();
+      ctx.restore();
+    } else if (b.wType === 'T' && b.fromPlayer) {
+      // Tracking: diamond shape with glow
+      ctx.fillStyle = col;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(Math.atan2(b.vy, b.vx));
+      ctx.beginPath();
+      ctx.moveTo(5, 0); ctx.lineTo(0, -3); ctx.lineTo(-4, 0); ctx.lineTo(0, 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(0, 0, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else if (b.wType === 'S' && b.fromPlayer) {
+      // Spread: small bright dots
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 2.5 + b.wLv * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 1, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (b.wType === 'R' && b.fromPlayer) {
+      // Rapid: elongated
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(Math.atan2(b.vy, b.vx));
+      ctx.fillStyle = col;
+      ctx.fillRect(-b.w / 2, -1.5, b.w, 3);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-b.w / 2 + 1, -0.5, b.w - 2, 1);
+      ctx.restore();
+    } else {
+      // Normal / Machine / Enemy
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.fromPlayer ? 3 : 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Particles
+  for (let p of particles) {
+    ctx.globalAlpha = p.life / 30;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
+function drawTriangle(x, baseY, width, height) {
+  ctx.beginPath();
+  ctx.moveTo(x, baseY);
+  ctx.lineTo(x + width / 2, baseY - height);
+  ctx.lineTo(x + width, baseY);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Game loop
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
